@@ -346,6 +346,10 @@ class DtoSchemaBuilder
             return $this->buildDataCollectionProperty($meta);
         }
 
+        if (str_contains($typeName, 'DateTime')) {
+            return $this->buildPrimitiveProperty($meta);
+        }
+
         // Detect nested Data subclass (non-builtin, non-array, non-enum)
         if ($typeName !== 'array' && !$type->isBuiltin() && !enum_exists($typeName)) {
             return $this->buildNestedObjectProperty($meta);
