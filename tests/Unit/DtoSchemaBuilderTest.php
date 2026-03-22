@@ -172,3 +172,31 @@ test('v3: DataCollection with DataCollectionOf still works (backward compat)', f
         ->and($prop->additionalProperties->type)->toBe('array')
         ->and($prop->additionalProperties->items->ref)->toBe('#/components/schemas/ExampleData');
 });
+
+// -------------------------------------------------------------------------
+// Spatie Laravel Data Optional unions (T|Optional)
+// -------------------------------------------------------------------------
+
+test('Optional union uses underlying type and omits property from request required', function () {
+    $schemas = $this->builder->buildAll();
+    $schema = collect($schemas)->first(fn (OA\Schema $s) => $s->schema === 'OptionalUnionTestRequest');
+
+    expect($schema)->not->toBeNull()
+        ->and($schema->required)->toBe(['required_field']);
+
+    $props = collect($schema->properties);
+
+    $artist = $props->first(fn (OA\Property $p) => $p->property === 'artist');
+    expect($artist->type)->toBe('string');
+
+    $title = $props->first(fn (OA\Property $p) => $p->property === 'title_reversed_union');
+    expect($title->type)->toBe('string');
+
+    $count = $props->first(fn (OA\Property $p) => $p->property === 'count');
+    expect($count->type)->toBe('integer');
+
+    $status = $props->first(fn (OA\Property $p) => $p->property === 'status');
+    expect($status->type)->toBe('string')
+        ->and($status->enum)->not->toBe(Generator::UNDEFINED)
+        ->and($status->default)->toBe('case1');
+});

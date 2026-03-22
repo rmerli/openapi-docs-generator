@@ -15,11 +15,14 @@ use ReflectionClass;
 use ReflectionNamedType;
 use ReflectionProperty;
 use ReflectionType;
+use ReflectionUnionType;
 use Spatie\LaravelData\Attributes\DataCollectionOf;
 use Symfony\Component\Finder\Finder;
 
 class DtoSchemaBuilder
 {
+    private const LARAVEL_DATA_OPTIONAL = 'Spatie\\LaravelData\\Optional';
+
     /** @var string[] */
     private array $dtoPaths;
 
@@ -236,21 +239,89 @@ class DtoSchemaBuilder
             'collectionOf' => $collectionOf,
             'groupedCollection' => $attributes->groupedCollection,
             'defaultValue' => $defaultValue,
-            'required' => !$type->allowsNull(),
+            'required' => !$type->allowsNull() && !$this->propertyDeclaresLaravelDataOptional($property),
         ];
     }
 
     /**
      * Resolve the effective ReflectionType for a property, unwrapping union types.
+     *
+     * Unions that include {@see \Spatie\LaravelData\Optional} are reduced to the remaining
+     * type(s) for schema generation (same idea as optional request fields / ?T).
      */
     private function resolvePropertyType(ReflectionProperty $property): ReflectionType
     {
         $type = $property->getType();
-        if (method_exists($type, 'getTypes')) {
-            [$type] = $type->getTypes();
+        if ($type === null) {
+            throw new Exception('Cannot reflect OpenAPI type for an untyped property.');
         }
 
-        return $type;
+        if (!$type instanceof ReflectionUnionType) {
+            return $type;
+        }
+
+        $declaringClass = $property->getDeclaringClass();
+        $nonOptionalMembers = [];
+        foreach ($type->getTypes() as $member) {
+            if (!$member instanceof ReflectionNamedType) {
+                continue;
+            }
+            if ($this->isLaravelDataOptionalNamedType($member, $declaringClass)) {
+                continue;
+            }
+            $nonOptionalMembers[] = $member;
+        }
+
+        if (count($nonOptionalMembers) === 1) {
+            return $nonOptionalMembers[0];
+        }
+
+        if (count($nonOptionalMembers) > 1) {
+            // e.g. int|string|Optional — document the first remaining arm (no OpenAPI oneOf yet)
+            return $nonOptionalMembers[0];
+        }
+
+        return $type->getTypes()[0];
+    }
+
+    /**
+     * Whether the property type is a union that includes Laravel Data's Optional sentinel.
+     */
+    private function propertyDeclaresLaravelDataOptional(ReflectionProperty $property): bool
+    {
+        $type = $property->getType();
+        if (!$type instanceof ReflectionUnionType) {
+            return false;
+        }
+
+        $declaringClass = $property->getDeclaringClass();
+        foreach ($type->getTypes() as $member) {
+            if ($member instanceof ReflectionNamedType
+                && $this->isLaravelDataOptionalNamedType($member, $declaringClass)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * True when this named type refers to Spatie's Optional (FQCN or import alias).
+     */
+    private function isLaravelDataOptionalNamedType(ReflectionNamedType $type, ReflectionClass $declaringClass): bool
+    {
+        $name = $type->getName();
+        if ($name === self::LARAVEL_DATA_OPTIONAL) {
+            return true;
+        }
+
+        if (class_exists($name) && is_a($name, self::LARAVEL_DATA_OPTIONAL, true)) {
+            return true;
+        }
+
+        $fqcn = $this->resolveClassFqcn($name, $declaringClass);
+
+        return $fqcn === self::LARAVEL_DATA_OPTIONAL;
     }
 
     /**
@@ -317,6 +388,14 @@ class DtoSchemaBuilder
      */
     private function normalizeEnumDefault(mixed $defaultValue, ?ReflectionType $type): mixed
     {
+        if ($type instanceof ReflectionUnionType) {
+            foreach ($type->getTypes() as $member) {
+                if ($member instanceof ReflectionNamedType && enum_exists($member->getName())) {
+                    return $defaultValue->value;
+                }
+            }
+        }
+
         if ($type instanceof ReflectionNamedType && enum_exists($type->getName())) {
             return $defaultValue->value;
         }
