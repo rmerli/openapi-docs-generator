@@ -20,6 +20,8 @@ class EndpointGenerator
 {
     private const METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
+    private OA\OpenApi $openApi;
+
     /**
      * @param array<string, mixed> $config
      */
@@ -36,6 +38,8 @@ class EndpointGenerator
         if (! function_exists('app')) {
             return;
         }
+
+        $this->openApi = $openApi;
 
         $router = app('router');
         $routes = $router->getRoutes();
@@ -84,6 +88,7 @@ class EndpointGenerator
         $requestMeta = $this->firstAttribute($method, OpenApiRequest::class);
         $responseMetas = $this->attributes($method, OpenApiResponse::class);
         $securityMeta = $this->firstAttribute($method, OpenApiSecurity::class);
+        $requestClass = $this->resolveRequestClass($method, $requestMeta);
         $validationRules = $this->resolveValidationRules($method);
 
         $parameters = $this->buildParameters($route, $httpMethod, $validationRules, $requestMeta);
@@ -92,12 +97,9 @@ class EndpointGenerator
             'path' => $path,
             'operationId' => $endpointMeta?->operationId ?? $this->operationId($route, $method, $httpMethod),
             'tags' => $endpointMeta?->tags ?? [$this->tagName($method)],
+            'summary' => $endpointMeta?->summary ?? $this->summaryFromDocBlock($method) ?? Str::headline($method->getName()),
             'responses' => $this->buildResponses($method, $responseMetas),
         ];
-
-        if ($endpointMeta?->summary !== null) {
-            $props['summary'] = $endpointMeta->summary;
-        }
 
         if ($endpointMeta?->description !== null) {
             $props['description'] = $endpointMeta->description;
@@ -107,7 +109,7 @@ class EndpointGenerator
             $props['parameters'] = $parameters;
         }
 
-        $requestBody = $this->buildRequestBody($httpMethod, $validationRules, $requestMeta);
+        $requestBody = $this->buildRequestBody($httpMethod, $validationRules, $requestMeta, $requestClass);
         if ($requestBody !== null) {
             $props['requestBody'] = $requestBody;
         }
@@ -274,7 +276,14 @@ class EndpointGenerator
             return str_replace(['.', '-'], '_', $name);
         }
 
-        return strtolower($httpMethod) . ucfirst($method->getDeclaringClass()->getShortName()) . ucfirst($method->getName());
+        $controller = preg_replace('/Controller$/', '', $method->getDeclaringClass()->getShortName())
+            ?: $method->getDeclaringClass()->getShortName();
+
+        return implode('_', array_filter([
+            strtolower($httpMethod),
+            Str::snake($controller),
+            Str::snake($method->getName()),
+        ]));
     }
 
     private function tagName(ReflectionMethod $method): string
@@ -285,24 +294,76 @@ class EndpointGenerator
         return Str::headline($shortName);
     }
 
+    private function summaryFromDocBlock(ReflectionMethod $method): ?string
+    {
+        $docComment = $method->getDocComment();
+        if ($docComment === false) {
+            return null;
+        }
+
+        $lines = preg_split('/\R/', $docComment) ?: [];
+        $summaryLines = [];
+
+        foreach ($lines as $line) {
+            $line = trim($line);
+            $line = preg_replace('/^\/\*\*?|\*\/$/', '', $line) ?? $line;
+            $line = trim(preg_replace('/^\*\s?/', '', $line) ?? $line);
+
+            if ($line === '') {
+                if (! empty($summaryLines)) {
+                    break;
+                }
+                continue;
+            }
+
+            if (str_starts_with($line, '@')) {
+                break;
+            }
+
+            $summaryLines[] = $line;
+        }
+
+        $summary = trim(implode(' ', $summaryLines));
+
+        return $summary !== '' ? $summary : null;
+    }
+
     private function resolveValidationRules(ReflectionMethod $method): array
     {
+        $requestClass = $this->resolveRequestClass($method);
+        if ($requestClass === null) {
+            return [];
+        }
+
+        if (is_a($requestClass, FormRequest::class, true)) {
+            return $this->rulesFromClass($requestClass);
+        }
+
+        if (is_a($requestClass, Data::class, true)) {
+            return $this->rulesFromClass($requestClass);
+        }
+
+        return [];
+    }
+
+    private function resolveRequestClass(ReflectionMethod $method, ?OpenApiRequest $requestMeta = null): ?string
+    {
+        if ($requestMeta !== null && class_exists($requestMeta->class)) {
+            return $requestMeta->class;
+        }
+
         foreach ($method->getParameters() as $parameter) {
             $className = $this->parameterClassName($parameter);
             if ($className === null) {
                 continue;
             }
 
-            if (is_a($className, FormRequest::class, true)) {
-                return $this->rulesFromClass($className);
-            }
-
-            if (is_a($className, Data::class, true)) {
-                return $this->rulesFromClass($className);
+            if (is_a($className, FormRequest::class, true) || is_a($className, Data::class, true)) {
+                return $className;
             }
         }
 
-        return [];
+        return null;
     }
 
     private function rulesFromClass(string $className): array
@@ -386,23 +447,29 @@ class EndpointGenerator
         ]);
     }
 
-    private function buildRequestBody(string $httpMethod, array $validationRules, ?OpenApiRequest $requestMeta): ?OA\RequestBody
+    private function buildRequestBody(
+        string $httpMethod,
+        array $validationRules,
+        ?OpenApiRequest $requestMeta,
+        ?string $requestClass,
+    ): ?OA\RequestBody
     {
-        if ($requestMeta !== null && is_a($requestMeta->class, Data::class, true) && $requestMeta->in !== 'query') {
-            return new OA\RequestBody([
-                'required' => true,
-                'content' => [
-                    new OA\MediaType([
-                        'mediaType' => 'application/json',
-                        'schema' => new OA\Schema([
-                            'ref' => '#/components/schemas/' . SchemaNameResolver::resolve($requestMeta->class),
-                        ]),
-                    ]),
-                ],
-            ]);
+        if ($httpMethod === 'get' || $requestMeta?->in === 'query') {
+            return null;
         }
 
-        if ($httpMethod === 'get' || empty($validationRules)) {
+        if ($requestClass !== null && is_a($requestClass, Data::class, true)) {
+            return $this->requestBodyFromRef(SchemaNameResolver::resolve($requestClass), true);
+        }
+
+        if ($requestClass !== null && is_a($requestClass, FormRequest::class, true)) {
+            $schemaName = class_basename($requestClass);
+            $this->ensureFormRequestSchema($schemaName, $validationRules);
+
+            return $this->requestBodyFromRef($schemaName, ! empty($validationRules));
+        }
+
+        if (empty($validationRules)) {
             return null;
         }
 
@@ -448,14 +515,108 @@ class EndpointGenerator
         ]);
     }
 
+    private function requestBodyFromRef(string $schemaName, bool $required): OA\RequestBody
+    {
+        return new OA\RequestBody([
+            'required' => $required,
+            'content' => [
+                new OA\MediaType([
+                    'mediaType' => 'application/json',
+                    'schema' => new OA\Schema([
+                        'ref' => '#/components/schemas/' . $schemaName,
+                    ]),
+                ]),
+            ],
+        ]);
+    }
+
+    private function ensureFormRequestSchema(string $schemaName, array $validationRules): void
+    {
+        if ($this->componentSchemaExists($schemaName)) {
+            return;
+        }
+
+        if ($this->openApi->components === OpenApiGen::UNDEFINED) {
+            $this->openApi->components = new OA\Components([]);
+        }
+
+        if ($this->openApi->components->schemas === OpenApiGen::UNDEFINED) {
+            $this->openApi->components->schemas = [];
+        }
+
+        $properties = [];
+        $required = [];
+
+        foreach ($validationRules as $name => $rules) {
+            if (str_contains((string) $name, '.')) {
+                continue;
+            }
+
+            $properties[] = new OA\Property([
+                'property' => (string) $name,
+                ...$this->schemaPropertiesFromRules($rules),
+            ]);
+
+            if ($this->ruleListContains($rules, 'required')) {
+                $required[] = (string) $name;
+            }
+        }
+
+        $schemaProps = [
+            'schema' => $schemaName,
+            'type' => 'object',
+            'properties' => $properties,
+        ];
+
+        if (! empty($required)) {
+            $schemaProps['required'] = $required;
+        }
+
+        $this->openApi->components->schemas[] = new OA\Schema($schemaProps);
+    }
+
+    private function componentSchemaExists(string $schemaName): bool
+    {
+        if ($this->openApi->components === OpenApiGen::UNDEFINED) {
+            return false;
+        }
+
+        if ($this->openApi->components->schemas === OpenApiGen::UNDEFINED) {
+            return false;
+        }
+
+        foreach ($this->openApi->components->schemas as $schema) {
+            if ($schema instanceof OA\Schema && $schema->schema === $schemaName) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private function buildResponses(ReflectionMethod $method, array $responseMetas): array
     {
         $responses = [];
 
         if (empty($responseMetas)) {
             $inferredClass = $this->responseClassFromReturnType($method);
+            $inferredCollection = false;
+
+            if ($inferredClass === null) {
+                $bodyInference = $this->responseClassFromMethodBody($method);
+                $inferredClass = $bodyInference?->className;
+                $inferredCollection = $bodyInference?->collection ?? false;
+                $inferredStatus = $bodyInference?->status ?? 200;
+            } else {
+                $inferredStatus = 200;
+            }
+
             if ($inferredClass !== null) {
-                $responseMetas[] = new OpenApiResponse($inferredClass);
+                $responseMetas[] = new OpenApiResponse(
+                    $inferredClass,
+                    status: $inferredStatus,
+                    collection: $inferredCollection,
+                );
             }
         }
 
@@ -495,6 +656,213 @@ class EndpointGenerator
         $className = $type->getName();
 
         return is_a($className, Data::class, true) ? $className : null;
+    }
+
+    private function responseClassFromMethodBody(ReflectionMethod $method): ?object
+    {
+        $body = $this->methodBody($method);
+        if ($body === null) {
+            return null;
+        }
+
+        preg_match_all(
+            '/(?<![A-Za-z0-9_\\\\])([A-Z][A-Za-z0-9_\\\\]*)::(from|collect|collection)\s*\(/',
+            $body,
+            $matches,
+            PREG_SET_ORDER | PREG_OFFSET_CAPTURE,
+        );
+
+        foreach ($matches as $match) {
+            $className = $this->resolveClassFqcn($match[1][0], $method->getDeclaringClass());
+            if ($className === null || ! is_a($className, Data::class, true)) {
+                continue;
+            }
+
+            return (object) [
+                'className' => $className,
+                'collection' => in_array($match[2][0], ['collect', 'collection'], true),
+                'status' => $this->responseStatusFromDataChain($body, $match[0][1], $method->getDeclaringClass()),
+            ];
+        }
+
+        return null;
+    }
+
+    private function responseStatusFromDataChain(string $body, int $offset, ReflectionClass $declaringClass): int
+    {
+        $chain = substr($body, $offset, 1000);
+
+        if (! preg_match('/->toJsonResponse\s*\(\s*([^)]*)\)/', $chain, $matches)) {
+            return 200;
+        }
+
+        $arguments = trim($matches[1] ?? '');
+        if ($arguments === '') {
+            return 200;
+        }
+
+        $firstArgument = trim(explode(',', $arguments)[0]);
+
+        return $this->statusCodeFromExpression($firstArgument, $declaringClass) ?? 200;
+    }
+
+    private function statusCodeFromExpression(string $expression, ReflectionClass $declaringClass): ?int
+    {
+        $expression = trim($expression, " \t\n\r\0\x0B\\");
+
+        if (is_numeric($expression)) {
+            return (int) $expression;
+        }
+
+        if (preg_match('/^([A-Za-z_\\\\][A-Za-z0-9_\\\\]*)::(HTTP_[A-Z0-9_]+)$/', $expression, $matches)) {
+            $className = $this->resolveClassFqcn($matches[1], $declaringClass);
+            if ($className !== null && defined($className . '::' . $matches[2])) {
+                return (int) constant($className . '::' . $matches[2]);
+            }
+
+            return $this->commonHttpStatusCode($matches[2]);
+        }
+
+        return null;
+    }
+
+    private function commonHttpStatusCode(string $constant): ?int
+    {
+        return [
+            'HTTP_CONTINUE' => 100,
+            'HTTP_SWITCHING_PROTOCOLS' => 101,
+            'HTTP_PROCESSING' => 102,
+            'HTTP_EARLY_HINTS' => 103,
+            'HTTP_OK' => 200,
+            'HTTP_CREATED' => 201,
+            'HTTP_ACCEPTED' => 202,
+            'HTTP_NON_AUTHORITATIVE_INFORMATION' => 203,
+            'HTTP_NO_CONTENT' => 204,
+            'HTTP_RESET_CONTENT' => 205,
+            'HTTP_PARTIAL_CONTENT' => 206,
+            'HTTP_MULTI_STATUS' => 207,
+            'HTTP_ALREADY_REPORTED' => 208,
+            'HTTP_IM_USED' => 226,
+            'HTTP_MULTIPLE_CHOICES' => 300,
+            'HTTP_MOVED_PERMANENTLY' => 301,
+            'HTTP_FOUND' => 302,
+            'HTTP_SEE_OTHER' => 303,
+            'HTTP_NOT_MODIFIED' => 304,
+            'HTTP_USE_PROXY' => 305,
+            'HTTP_RESERVED' => 306,
+            'HTTP_TEMPORARY_REDIRECT' => 307,
+            'HTTP_PERMANENTLY_REDIRECT' => 308,
+            'HTTP_BAD_REQUEST' => 400,
+            'HTTP_UNAUTHORIZED' => 401,
+            'HTTP_PAYMENT_REQUIRED' => 402,
+            'HTTP_FORBIDDEN' => 403,
+            'HTTP_NOT_FOUND' => 404,
+            'HTTP_METHOD_NOT_ALLOWED' => 405,
+            'HTTP_NOT_ACCEPTABLE' => 406,
+            'HTTP_PROXY_AUTHENTICATION_REQUIRED' => 407,
+            'HTTP_REQUEST_TIMEOUT' => 408,
+            'HTTP_CONFLICT' => 409,
+            'HTTP_GONE' => 410,
+            'HTTP_LENGTH_REQUIRED' => 411,
+            'HTTP_PRECONDITION_FAILED' => 412,
+            'HTTP_REQUEST_ENTITY_TOO_LARGE' => 413,
+            'HTTP_REQUEST_URI_TOO_LONG' => 414,
+            'HTTP_UNSUPPORTED_MEDIA_TYPE' => 415,
+            'HTTP_REQUESTED_RANGE_NOT_SATISFIABLE' => 416,
+            'HTTP_EXPECTATION_FAILED' => 417,
+            'HTTP_I_AM_A_TEAPOT' => 418,
+            'HTTP_MISDIRECTED_REQUEST' => 421,
+            'HTTP_UNPROCESSABLE_ENTITY' => 422,
+            'HTTP_LOCKED' => 423,
+            'HTTP_FAILED_DEPENDENCY' => 424,
+            'HTTP_TOO_EARLY' => 425,
+            'HTTP_UPGRADE_REQUIRED' => 426,
+            'HTTP_PRECONDITION_REQUIRED' => 428,
+            'HTTP_TOO_MANY_REQUESTS' => 429,
+            'HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE' => 431,
+            'HTTP_UNAVAILABLE_FOR_LEGAL_REASONS' => 451,
+            'HTTP_INTERNAL_SERVER_ERROR' => 500,
+            'HTTP_NOT_IMPLEMENTED' => 501,
+            'HTTP_BAD_GATEWAY' => 502,
+            'HTTP_SERVICE_UNAVAILABLE' => 503,
+            'HTTP_GATEWAY_TIMEOUT' => 504,
+            'HTTP_VERSION_NOT_SUPPORTED' => 505,
+            'HTTP_VARIANT_ALSO_NEGOTIATES_EXPERIMENTAL' => 506,
+            'HTTP_INSUFFICIENT_STORAGE' => 507,
+            'HTTP_LOOP_DETECTED' => 508,
+            'HTTP_NOT_EXTENDED' => 510,
+            'HTTP_NETWORK_AUTHENTICATION_REQUIRED' => 511,
+        ][$constant] ?? null;
+    }
+
+    private function methodBody(ReflectionMethod $method): ?string
+    {
+        $file = $method->getFileName();
+        if ($file === false || ! is_file($file)) {
+            return null;
+        }
+
+        $lines = file($file);
+        if ($lines === false) {
+            return null;
+        }
+
+        $start = $method->getStartLine();
+        $length = $method->getEndLine() - $start + 1;
+
+        return implode('', array_slice($lines, $start - 1, $length));
+    }
+
+    private function resolveClassFqcn(string $className, ReflectionClass $declaringClass): ?string
+    {
+        if (str_starts_with($className, '\\')) {
+            return class_exists(ltrim($className, '\\')) ? ltrim($className, '\\') : null;
+        }
+
+        if (str_contains($className, '\\')) {
+            return class_exists($className) ? $className : null;
+        }
+
+        $sameNamespace = $declaringClass->getNamespaceName() . '\\' . $className;
+        if (class_exists($sameNamespace)) {
+            return $sameNamespace;
+        }
+
+        foreach ($this->importsForClass($declaringClass) as $alias => $fqcn) {
+            if ($alias === $className && class_exists($fqcn)) {
+                return $fqcn;
+            }
+        }
+
+        return class_exists($className) ? $className : null;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function importsForClass(ReflectionClass $class): array
+    {
+        $file = $class->getFileName();
+        if ($file === false || ! is_file($file)) {
+            return [];
+        }
+
+        $contents = file_get_contents($file);
+        if ($contents === false) {
+            return [];
+        }
+
+        preg_match_all('/^use\s+([^;]+);/m', $contents, $matches);
+
+        $imports = [];
+        foreach ($matches[1] ?? [] as $useStatement) {
+            $parts = preg_split('/\s+as\s+/i', trim($useStatement));
+            $fqcn = trim($parts[0], '\\');
+            $alias = isset($parts[1]) ? trim($parts[1]) : class_basename($fqcn);
+            $imports[$alias] = $fqcn;
+        }
+
+        return $imports;
     }
 
     private function buildResponse(int|string $status, string $className, bool $collection, string $description): OA\Response

@@ -218,6 +218,18 @@ test('endpoint auto-generation creates operations from scoped Laravel routes', f
         ->middleware('auth:sanctum')
         ->name('generated.store');
 
+    app('router')->get('/api/generated/my-open', [GeneratedEndpointController::class, 'getOpen'])
+        ->middleware('auth:sanctum')
+        ->name('generated.open');
+
+    app('router')->post('/api/generated/inferred-status', [GeneratedEndpointController::class, 'createWithInferredStatus'])
+        ->middleware('auth:sanctum')
+        ->name('generated.inferred-status');
+
+    app('router')->post('/api/generated/numeric-status', [GeneratedEndpointController::class, 'createWithNumericStatus'])
+        ->middleware('auth:sanctum')
+        ->name('generated.numeric-status');
+
     $generator = makeGenerator(
         docsFile: $this->docsFile,
         yamlFile: $this->yamlFile,
@@ -234,6 +246,15 @@ test('endpoint auto-generation creates operations from scoped Laravel routes', f
     $generator->generateDocs();
 
     $json = json_decode(file_get_contents($this->docsFile), true);
+    expect(array_keys($json['paths']))->toBe([
+        '/api',
+        '/api/examples',
+        '/api/generated',
+        '/api/generated/inferred-status',
+        '/api/generated/my-open',
+        '/api/generated/numeric-status',
+        '/api/generated/{project}',
+    ]);
 
     $get = $json['paths']['/api/generated/{project}']['get'];
     expect($get['operationId'])->toBe('generated_show')
@@ -252,6 +273,21 @@ test('endpoint auto-generation creates operations from scoped Laravel routes', f
     $post = $json['paths']['/api/generated']['post'];
     expect($post['responses'])->toHaveKey('201')
         ->and($post['responses']['201']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData')
-        ->and($post['requestBody']['content']['application/json']['schema']['required'])->toBe(['project', 'name'])
-        ->and($post['requestBody']['content']['application/json']['schema']['properties']['name']['maxLength'])->toBe(120);
+        ->and($post['requestBody']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/GeneratedEndpointRequest')
+        ->and($json['components']['schemas']['GeneratedEndpointRequest']['required'])->toBe(['project', 'name'])
+        ->and($json['components']['schemas']['GeneratedEndpointRequest']['properties']['name']['maxLength'])->toBe(120);
+
+    $open = $json['paths']['/api/generated/my-open']['get'];
+    expect($open['summary'])->toBe('Get open generated project from docblock.')
+        ->and($open['responses']['200']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData');
+
+    $inferredStatus = $json['paths']['/api/generated/inferred-status']['post'];
+    expect($inferredStatus['responses'])->toHaveKey('201')
+        ->and($inferredStatus['responses'])->not->toHaveKey('200')
+        ->and($inferredStatus['responses']['201']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData');
+
+    $numericStatus = $json['paths']['/api/generated/numeric-status']['post'];
+    expect($numericStatus['responses'])->toHaveKey('451')
+        ->and($numericStatus['responses'])->not->toHaveKey('200')
+        ->and($numericStatus['responses']['451']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData');
 });

@@ -45,6 +45,7 @@ class OpenApiGenerator
         $this->generateEndpoints();
         $this->populateServers();
         $this->enrichEndpointParameters();
+        $this->sortPaths();
         $this->saveJson();
         $this->injectSecurity();
         $this->makeYamlCopy();
@@ -265,6 +266,21 @@ class OpenApiGenerator
         );
 
         $enricher->enrich($this->openApi);
+    }
+
+    /**
+     * Sort paths alphabetically for stable, readable output.
+     */
+    private function sortPaths(): void
+    {
+        if ($this->openApi->paths === Generator::UNDEFINED || ! is_array($this->openApi->paths)) {
+            return;
+        }
+
+        usort(
+            $this->openApi->paths,
+            static fn (OA\PathItem $a, OA\PathItem $b): int => strcmp($a->path, $b->path),
+        );
     }
 
     /**
