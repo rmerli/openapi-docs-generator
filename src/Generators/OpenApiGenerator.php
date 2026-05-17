@@ -26,6 +26,7 @@ class OpenApiGenerator
         private ?string $basePath,
         private bool $yamlCopy,
         private array $endpointParametersConfig,
+        private array $endpointsConfig,
         private DtoSchemaBuilder $dtoSchemaBuilder,
         private ?LoggerInterface $logger = null,
     ) {}
@@ -41,11 +42,24 @@ class OpenApiGenerator
         $this->defineConstants();
         $this->scanFilesForDocumentation();
         $this->buildAndMergeDtoSchemas();
+        $this->generateEndpoints();
         $this->populateServers();
         $this->enrichEndpointParameters();
         $this->saveJson();
         $this->injectSecurity();
         $this->makeYamlCopy();
+    }
+
+    /**
+     * Generate OpenAPI operations from Laravel routes when enabled.
+     */
+    private function generateEndpoints(): void
+    {
+        if (empty($this->endpointsConfig['enabled'])) {
+            return;
+        }
+
+        (new EndpointGenerator($this->endpointsConfig))->generate($this->openApi);
     }
 
     /**

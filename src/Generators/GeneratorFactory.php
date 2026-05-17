@@ -36,6 +36,7 @@ class GeneratorFactory
             basePath: $config['paths']['base'] ?? null,
             yamlCopy: $config['generate_yaml_copy'] ?? false,
             endpointParametersConfig: $config['endpoint_parameters'] ?? [],
+            endpointsConfig: $config['endpoints'] ?? [],
             dtoSchemaBuilder: $dtoSchemaBuilder,
             logger: $logger,
         );

@@ -3,6 +3,7 @@
 use Langsys\OpenApiDocsGenerator\Generators\DtoSchemaBuilder;
 use Langsys\OpenApiDocsGenerator\Generators\ExampleGenerator;
 use Langsys\OpenApiDocsGenerator\Generators\OpenApiGenerator;
+use Langsys\OpenApiDocsGenerator\Tests\Fixtures\GeneratedEndpointController;
 use Psr\Log\NullLogger;
 
 beforeEach(function () {
@@ -25,6 +26,7 @@ function makeGenerator(
     array $security = [],
     ?string $basePath = null,
     bool $yamlCopy = false,
+    array $endpointsConfig = [],
 ): OpenApiGenerator {
     $packageRoot = dirname(__DIR__, 2);
 
@@ -50,6 +52,7 @@ function makeGenerator(
         basePath: $basePath,
         yamlCopy: $yamlCopy,
         endpointParametersConfig: [],
+        endpointsConfig: $endpointsConfig,
         dtoSchemaBuilder: $dtoSchemaBuilder,
         logger: new NullLogger(),
     );
@@ -184,4 +187,71 @@ test('annotation-defined schemas take precedence over DTO schemas', function () 
 
     // ExampleData should exist as a key (not duplicated)
     expect($json['components']['schemas'])->toHaveKey('ExampleData');
+});
+
+test('endpoint auto-generation preserves annotated operations', function () {
+    app('router')->get('/api/examples', [GeneratedEndpointController::class, 'show'])
+        ->name('examples.generated');
+
+    $generator = makeGenerator(
+        docsFile: $this->docsFile,
+        yamlFile: $this->yamlFile,
+        endpointsConfig: [
+            'enabled' => true,
+            'prefixes' => ['api/examples'],
+        ],
+    );
+    $generator->generateDocs();
+
+    $json = json_decode(file_get_contents($this->docsFile), true);
+
+    expect($json['paths']['/api/examples']['get']['summary'])->toBe('List examples')
+        ->and($json['paths']['/api/examples']['get']['operationId'])->not->toBe('examples_generated');
+});
+
+test('endpoint auto-generation creates operations from scoped Laravel routes', function () {
+    app('router')->get('/api/generated/{project}', [GeneratedEndpointController::class, 'show'])
+        ->middleware('auth:sanctum')
+        ->name('generated.show');
+
+    app('router')->post('/api/generated', [GeneratedEndpointController::class, 'store'])
+        ->middleware('auth:sanctum')
+        ->name('generated.store');
+
+    $generator = makeGenerator(
+        docsFile: $this->docsFile,
+        yamlFile: $this->yamlFile,
+        endpointsConfig: [
+            'enabled' => true,
+            'prefixes' => ['api/generated'],
+            'security' => ['auth:sanctum' => 'sanctum'],
+            'default_responses' => [
+                422 => 'Validation error',
+            ],
+        ],
+    );
+
+    $generator->generateDocs();
+
+    $json = json_decode(file_get_contents($this->docsFile), true);
+
+    $get = $json['paths']['/api/generated/{project}']['get'];
+    expect($get['operationId'])->toBe('generated_show')
+        ->and($get['tags'])->toBe(['Projects'])
+        ->and($get['summary'])->toBe('Show generated project')
+        ->and($get['security'])->toBe([['sanctum' => []]])
+        ->and($get['responses']['200']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData')
+        ->and($get['responses'])->toHaveKey('422');
+
+    $parameters = collect($get['parameters'])->keyBy('name');
+    expect($parameters['project']['in'])->toBe('path')
+        ->and($parameters['project']['schema']['type'])->toBe('integer')
+        ->and($parameters['include']['in'])->toBe('query')
+        ->and($parameters['include']['schema']['enum'])->toBe(['owner', 'tasks']);
+
+    $post = $json['paths']['/api/generated']['post'];
+    expect($post['responses'])->toHaveKey('201')
+        ->and($post['responses']['201']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData')
+        ->and($post['requestBody']['content']['application/json']['schema']['required'])->toBe(['project', 'name'])
+        ->and($post['requestBody']['content']['application/json']['schema']['properties']['name']['maxLength'])->toBe(120);
 });

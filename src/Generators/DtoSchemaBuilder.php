@@ -799,12 +799,7 @@ class DtoSchemaBuilder
      */
     private function resolveSchemaName(string $className): string
     {
-        $baseName = class_basename($className);
-        if (str_contains($baseName, 'Resource')) {
-            return str_replace('Resource', '', $baseName);
-        }
-
-        return $baseName;
+        return SchemaNameResolver::resolve($className);
     }
 
     /**

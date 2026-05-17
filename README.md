@@ -33,6 +33,7 @@ Generate OpenAPI 3.x documentation directly from [Spatie Laravel Data](https://s
   - [Server / Base Path](#server--base-path)
   - [Constants](#constants)
   - [Scan Options](#scan-options)
+  - [Endpoint Auto-Generation](#endpoint-auto-generation)
 - [Thunder Client Integration](#thunder-client-integration)
   - [Quick Start](#thunder-client-quick-start)
   - [How It Works](#how-thunder-client-generation-works)
@@ -55,6 +56,7 @@ php artisan openapi:generate
   +-- Scan controller annotations (zircote/swagger-php)
   +-- Reflect on Spatie Data DTOs -> build OpenAPI Schema objects in memory
   +-- Merge DTO schemas into the OpenAPI model
+  +-- Optionally generate missing endpoints from Laravel routes
   +-- Inject security definitions from config
   +-- Write api-docs.json / api-docs.yaml
 ```
@@ -936,6 +938,58 @@ class TagOrderProcessor
             new Tag(['name' => 'Billing']),
             // Add all your tags here in the desired order...
         ];
+    }
+}
+```
+
+### Endpoint Auto-Generation
+
+Endpoint generation is disabled by default. When enabled, matching Laravel routes are reflected into OpenAPI operations after controller annotations are scanned. If a handwritten annotation already defines the same method and path, the annotation wins and the generated operation is skipped.
+
+```php
+'endpoints' => [
+    'enabled' => true,
+    'prefixes' => ['api/v1'],
+    'names' => ['api.*'],
+    'middleware' => [],
+    'exclude' => ['api/v1/internal/*'],
+    'security' => [
+        'auth:sanctum' => 'sanctum',
+    ],
+    'default_responses' => [
+        401 => 'Unauthenticated',
+        403 => 'Forbidden',
+        404 => 'Not found',
+        422 => 'Validation error',
+    ],
+],
+```
+
+The generator infers path parameters from route placeholders, query parameters for `GET` routes from FormRequest or Data validation rules, JSON request bodies for non-`GET` routes, raw DTO response refs from Spatie Data return types, tags from controller names, operation IDs from route names, and operation security from the configured middleware map.
+
+Use package attributes when inference is ambiguous:
+
+```php
+use Langsys\OpenApiDocsGenerator\Generators\Attributes\OpenApiEndpoint;
+use Langsys\OpenApiDocsGenerator\Generators\Attributes\OpenApiRequest;
+use Langsys\OpenApiDocsGenerator\Generators\Attributes\OpenApiResponse;
+use Langsys\OpenApiDocsGenerator\Generators\Attributes\OpenApiSecurity;
+
+#[OpenApiEndpoint(tags: ['Projects'])]
+class ProjectController
+{
+    #[OpenApiEndpoint(summary: 'Create project')]
+    #[OpenApiRequest(StoreProjectData::class)]
+    #[OpenApiResponse(ProjectData::class, status: 201)]
+    public function store(StoreProjectData $data): ProjectData
+    {
+        // ...
+    }
+
+    #[OpenApiSecurity([])] // public endpoint
+    public function publicIndex(): array
+    {
+        // ...
     }
 }
 ```

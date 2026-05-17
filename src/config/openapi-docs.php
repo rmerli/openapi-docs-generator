@@ -139,6 +139,28 @@ return [
             'enabled' => false,
         ],
 
+        // --- Endpoint Auto-Generation ---
+        // Disabled by default for backward compatibility. When enabled, Laravel
+        // routes matching the configured scopes are reflected into OpenAPI
+        // operations unless a handwritten annotation already defines the same
+        // method/path.
+        'endpoints' => [
+            'enabled' => false,
+            'prefixes' => [],
+            'names' => [],
+            'middleware' => [],
+            'exclude' => [],
+            'security' => [
+                // 'auth:sanctum' => 'sanctum',
+            ],
+            'default_responses' => [
+                // 401 => 'Unauthenticated',
+                // 403 => 'Forbidden',
+                // 404 => 'Not found',
+                // 422 => 'Validation error',
+            ],
+        ],
+
         // --- Thunder Client Collection Generation ---
         'thunder_client' => [
             // Thunder Client workspace root directory.
