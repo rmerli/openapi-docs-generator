@@ -1,5 +1,5 @@
 {
-    "name": "langsys/openapi-docs-generator",
+    "name": "rmerli/openapi-docs-generator",
     "description": "Automatic OpenAPI documentation generator from Spatie Laravel Data DTOs",
     "type": "library",
     "license": "MIT",
