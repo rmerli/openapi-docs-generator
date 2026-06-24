@@ -611,6 +611,11 @@ class EndpointGenerator
                 $inferredStatus = 200;
             }
 
+            if ($inferredClass === null) {
+                $inferredClass = $this->responseClassFromDocBlock($method);
+                $inferredStatus = 200;
+            }
+
             if ($inferredClass !== null) {
                 $responseMetas[] = new OpenApiResponse(
                     $inferredClass,
@@ -631,7 +636,7 @@ class EndpointGenerator
 
         if (empty($responses)) {
             $responses[] = new OA\Response([
-                'response' => 200,
+                'response' => $this->successStatusFromMethodBody($method) ?? 200,
                 'description' => 'Successful response',
             ]);
         }
@@ -658,6 +663,34 @@ class EndpointGenerator
         return is_a($className, Data::class, true) ? $className : null;
     }
 
+    private function responseClassFromDocBlock(ReflectionMethod $method): ?string
+    {
+        $docComment = $method->getDocComment();
+        if ($docComment === false) {
+            return null;
+        }
+
+        if (! preg_match('/@return\s+([^\s]+)/', $docComment, $matches)) {
+            return null;
+        }
+
+        foreach (preg_split('/[|&]/', $matches[1]) ?: [] as $type) {
+            $type = trim($type, "\\ \t\n\r\0\x0B");
+            $type = preg_replace('/<.*>$/', '', $type) ?? $type;
+
+            if ($type === '' || in_array(strtolower($type), ['self', 'static', '$this', 'void', 'null'], true)) {
+                continue;
+            }
+
+            $className = $this->resolveClassFqcn($type, $method->getDeclaringClass());
+            if ($className !== null && is_a($className, Data::class, true)) {
+                return $className;
+            }
+        }
+
+        return null;
+    }
+
     private function responseClassFromMethodBody(ReflectionMethod $method): ?object
     {
         $body = $this->methodBody($method);
@@ -666,7 +699,7 @@ class EndpointGenerator
         }
 
         preg_match_all(
-            '/(?<![A-Za-z0-9_\\\\])([A-Z][A-Za-z0-9_\\\\]*)::(from|collect|collection)\s*\(/',
+            '/(?<![A-Za-z0-9_\\\\])([A-Z][A-Za-z0-9_\\\\]*)::([A-Za-z_][A-Za-z0-9_]*)\s*\(/',
             $body,
             $matches,
             PREG_SET_ORDER | PREG_OFFSET_CAPTURE,
@@ -693,7 +726,7 @@ class EndpointGenerator
         $chain = substr($body, $offset, 1000);
 
         if (! preg_match('/->toJsonResponse\s*\(\s*([^)]*)\)/', $chain, $matches)) {
-            return 200;
+            return $this->responseJsonStatusContainingOffset($body, $offset, $declaringClass) ?? 200;
         }
 
         $arguments = trim($matches[1] ?? '');
@@ -704,6 +737,164 @@ class EndpointGenerator
         $firstArgument = trim(explode(',', $arguments)[0]);
 
         return $this->statusCodeFromExpression($firstArgument, $declaringClass) ?? 200;
+    }
+
+    private function successStatusFromMethodBody(ReflectionMethod $method): ?int
+    {
+        $body = $this->methodBody($method);
+        if ($body === null) {
+            return null;
+        }
+
+        preg_match_all('/response\(\)->json\s*\(/', $body, $matches, PREG_OFFSET_CAPTURE);
+        foreach ($matches[0] ?? [] as $match) {
+            $openParenOffset = $match[1] + strlen($match[0]) - 1;
+
+            $status = $this->responseJsonStatusFromCall($body, $openParenOffset, $method->getDeclaringClass());
+            if ($status !== null) {
+                return $status;
+            }
+        }
+
+        return null;
+    }
+
+    private function responseJsonStatusContainingOffset(string $body, int $offset, ReflectionClass $declaringClass): ?int
+    {
+        preg_match_all('/response\(\)->json\s*\(/', $body, $matches, PREG_OFFSET_CAPTURE);
+
+        foreach ($matches[0] ?? [] as $match) {
+            $openParenOffset = $match[1] + strlen($match[0]) - 1;
+
+            $closeParenOffset = $this->findClosingParen($body, $openParenOffset);
+            if ($closeParenOffset === null || $offset < $openParenOffset || $offset > $closeParenOffset) {
+                continue;
+            }
+
+            return $this->responseJsonStatusFromCall($body, $openParenOffset, $declaringClass);
+        }
+
+        return null;
+    }
+
+    private function responseJsonStatusFromCall(string $body, int $openParenOffset, ReflectionClass $declaringClass): ?int
+    {
+        $closeParenOffset = $this->findClosingParen($body, $openParenOffset);
+        if ($closeParenOffset === null) {
+            return null;
+        }
+
+        $arguments = substr($body, $openParenOffset + 1, $closeParenOffset - $openParenOffset - 1);
+        $statusArgument = $this->topLevelArgument($arguments, 1);
+
+        return $statusArgument !== null
+            ? $this->statusCodeFromExpression($statusArgument, $declaringClass)
+            : null;
+    }
+
+    private function findClosingParen(string $source, int $openParenOffset): ?int
+    {
+        $depth = 0;
+        $quote = null;
+        $escaped = false;
+        $length = strlen($source);
+
+        for ($i = $openParenOffset; $i < $length; $i++) {
+            $char = $source[$i];
+
+            if ($quote !== null) {
+                if ($escaped) {
+                    $escaped = false;
+                    continue;
+                }
+
+                if ($char === '\\') {
+                    $escaped = true;
+                    continue;
+                }
+
+                if ($char === $quote) {
+                    $quote = null;
+                }
+
+                continue;
+            }
+
+            if ($char === '"' || $char === "'") {
+                $quote = $char;
+                continue;
+            }
+
+            if ($char === '(') {
+                $depth++;
+                continue;
+            }
+
+            if ($char === ')') {
+                $depth--;
+                if ($depth === 0) {
+                    return $i;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function topLevelArgument(string $arguments, int $index): ?string
+    {
+        $parts = [];
+        $start = 0;
+        $depth = 0;
+        $quote = null;
+        $escaped = false;
+        $length = strlen($arguments);
+
+        for ($i = 0; $i < $length; $i++) {
+            $char = $arguments[$i];
+
+            if ($quote !== null) {
+                if ($escaped) {
+                    $escaped = false;
+                    continue;
+                }
+
+                if ($char === '\\') {
+                    $escaped = true;
+                    continue;
+                }
+
+                if ($char === $quote) {
+                    $quote = null;
+                }
+
+                continue;
+            }
+
+            if ($char === '"' || $char === "'") {
+                $quote = $char;
+                continue;
+            }
+
+            if (in_array($char, ['(', '[', '{'], true)) {
+                $depth++;
+                continue;
+            }
+
+            if (in_array($char, [')', ']', '}'], true)) {
+                $depth--;
+                continue;
+            }
+
+            if ($char === ',' && $depth === 0) {
+                $parts[] = trim(substr($arguments, $start, $i - $start));
+                $start = $i + 1;
+            }
+        }
+
+        $parts[] = trim(substr($arguments, $start));
+
+        return $parts[$index] ?? null;
     }
 
     private function statusCodeFromExpression(string $expression, ReflectionClass $declaringClass): ?int

@@ -47,6 +47,15 @@ test('it generates a schema for ExampleData', function () {
         ->and($prop->example)->toBe('test');
 });
 
+test('it generates an empty object schema for Data classes without properties', function () {
+    $schemas = $this->builder->buildAll();
+    $schema = collect($schemas)->first(fn (OA\Schema $s) => $s->schema === 'EmptyData');
+
+    expect($schema)->not->toBeNull()
+        ->and($schema->type)->toBe('object')
+        ->and($schema->properties)->toBe([]);
+});
+
 test('it generates a schema for TestData with correct properties', function () {
     $schemas = $this->builder->buildAll();
     $testSchema = collect($schemas)->first(fn (OA\Schema $s) => $s->schema === 'TestData');

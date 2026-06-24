@@ -230,6 +230,30 @@ test('endpoint auto-generation creates operations from scoped Laravel routes', f
         ->middleware('auth:sanctum')
         ->name('generated.numeric-status');
 
+    app('router')->post('/api/generated/data-request', [GeneratedEndpointController::class, 'createWithDataRequest'])
+        ->middleware('auth:sanctum')
+        ->name('generated.data-request');
+
+    app('router')->get('/api/generated/data-list', [GeneratedEndpointController::class, 'listDataResponses'])
+        ->middleware('auth:sanctum')
+        ->name('generated.data-list');
+
+    app('router')->post('/api/generated/custom-factory', [GeneratedEndpointController::class, 'createWithCustomFactory'])
+        ->middleware('auth:sanctum')
+        ->name('generated.custom-factory');
+
+    app('router')->post('/api/generated/docblock-response', [GeneratedEndpointController::class, 'createWithDocBlockResponse'])
+        ->middleware('auth:sanctum')
+        ->name('generated.docblock-response');
+
+    app('router')->post('/api/generated/response-json-collection', [GeneratedEndpointController::class, 'createWithResponseJsonCollection'])
+        ->middleware('auth:sanctum')
+        ->name('generated.response-json-collection');
+
+    app('router')->delete('/api/generated/no-content', [GeneratedEndpointController::class, 'deleteWithNoContent'])
+        ->middleware('auth:sanctum')
+        ->name('generated.no-content');
+
     $generator = makeGenerator(
         docsFile: $this->docsFile,
         yamlFile: $this->yamlFile,
@@ -250,9 +274,15 @@ test('endpoint auto-generation creates operations from scoped Laravel routes', f
         '/api',
         '/api/examples',
         '/api/generated',
+        '/api/generated/custom-factory',
+        '/api/generated/data-list',
+        '/api/generated/data-request',
+        '/api/generated/docblock-response',
         '/api/generated/inferred-status',
         '/api/generated/my-open',
+        '/api/generated/no-content',
         '/api/generated/numeric-status',
+        '/api/generated/response-json-collection',
         '/api/generated/{project}',
     ]);
 
@@ -290,4 +320,31 @@ test('endpoint auto-generation creates operations from scoped Laravel routes', f
     expect($numericStatus['responses'])->toHaveKey('451')
         ->and($numericStatus['responses'])->not->toHaveKey('200')
         ->and($numericStatus['responses']['451']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData');
+
+    $dataRequest = $json['paths']['/api/generated/data-request']['post'];
+    expect($dataRequest['requestBody']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/OptionalUnionTestRequest')
+        ->and($dataRequest['responses']['201']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData');
+
+    $dataList = $json['paths']['/api/generated/data-list']['get'];
+    expect($dataList['responses']['200']['content']['application/json']['schema']['type'])->toBe('array')
+        ->and($dataList['responses']['200']['content']['application/json']['schema']['items']['$ref'])->toBe('#/components/schemas/ExampleData');
+
+    $customFactory = $json['paths']['/api/generated/custom-factory']['post'];
+    expect($customFactory['responses'])->toHaveKey('202')
+        ->and($customFactory['responses'])->not->toHaveKey('200')
+        ->and($customFactory['responses']['202']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData');
+
+    $docBlockResponse = $json['paths']['/api/generated/docblock-response']['post'];
+    expect($docBlockResponse['responses']['200']['content']['application/json']['schema']['$ref'])->toBe('#/components/schemas/ExampleData');
+
+    $responseJsonCollection = $json['paths']['/api/generated/response-json-collection']['post'];
+    expect($responseJsonCollection['responses'])->toHaveKey('201')
+        ->and($responseJsonCollection['responses'])->not->toHaveKey('200')
+        ->and($responseJsonCollection['responses']['201']['content']['application/json']['schema']['type'])->toBe('array')
+        ->and($responseJsonCollection['responses']['201']['content']['application/json']['schema']['items']['$ref'])->toBe('#/components/schemas/ExampleData');
+
+    $noContent = $json['paths']['/api/generated/no-content']['delete'];
+    expect($noContent['responses'])->toHaveKey('204')
+        ->and($noContent['responses'])->not->toHaveKey('200')
+        ->and($noContent['responses']['204'])->not->toHaveKey('content');
 });

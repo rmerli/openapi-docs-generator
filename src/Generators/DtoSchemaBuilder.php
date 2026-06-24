@@ -104,10 +104,6 @@ class DtoSchemaBuilder
             }
         }
 
-        if (empty($properties)) {
-            return null;
-        }
-
         $schemaName = $this->resolveSchemaName($className);
 
         $schemaProps = [

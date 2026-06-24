@@ -11,4 +11,9 @@ class ExampleData extends Data
         #[Example("test")]
         public string $example
     ) {}
+
+    public static function fromModel(mixed $model): self
+    {
+        return new self((string) $model);
+    }
 }
