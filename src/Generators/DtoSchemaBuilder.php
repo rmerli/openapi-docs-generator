@@ -41,6 +41,9 @@ class DtoSchemaBuilder
     /** @var array<string, array<int, object>> */
     private array $oneOfGroups = [];
 
+    /** @var string[] */
+    private array $discoveredDataClasses = [];
+
     /**
      * @param string|string[] $dtoPaths Directories to scan for Data subclasses
      */
@@ -60,7 +63,8 @@ class DtoSchemaBuilder
     public function buildAll(): array
     {
         $schemas = [];
-        $classes = $this->discoverDtoClasses();
+        $classes = $this->discoverDtoClasses(includeAbstract: false);
+        $this->discoveredDataClasses = $this->discoverDtoClasses(includeAbstract: true);
         $this->oneOfGroups = $this->discoverOneOfGroups($classes);
 
         foreach ($classes as $className) {
@@ -89,6 +93,7 @@ class DtoSchemaBuilder
         $required = [];
 
         $isRequest = str_contains($className, 'Request');
+        $requiredFromRules = $this->requiredPropertiesFromRules($className);
 
         foreach ($this->getClassProperties($reflection) as $prop) {
             $meta = $this->extractPropertyMetadata($prop);
@@ -99,7 +104,7 @@ class DtoSchemaBuilder
             $oaProperty = $this->buildProperty($meta);
             $properties[] = $oaProperty;
 
-            if ($meta->required) {
+            if ($meta->required || in_array($meta->name, $requiredFromRules, true)) {
                 $required[] = $meta->name;
             }
         }
@@ -112,8 +117,9 @@ class DtoSchemaBuilder
             'properties' => $properties,
         ];
 
-        // Only include required for request schemas (matching v1 behavior)
-        if ($isRequest && !empty($required)) {
+        // Preserve v1 behavior for request DTOs, and also honor explicit
+        // Laravel Data validation rules for query/body DTOs with other names.
+        if (($isRequest || $requiredFromRules !== []) && !empty($required)) {
             $schemaProps['required'] = $required;
         }
 
@@ -129,7 +135,7 @@ class DtoSchemaBuilder
      *
      * @return string[]
      */
-    private function discoverDtoClasses(): array
+    private function discoverDtoClasses(bool $includeAbstract = false): array
     {
         $classes = [];
         $finder = new Finder();
@@ -143,7 +149,15 @@ class DtoSchemaBuilder
         foreach ($finder->files()->name('*.php')->in($existingPaths) as $file) {
             $className = $this->extractClassName($file->getRealPath());
 
-            if ($className !== null && ! (new ReflectionClass($className))->isAbstract() && $this->isDataSubclass($className)) {
+            if ($className === null || ! $this->isDataSubclass($className)) {
+                continue;
+            }
+
+            if (! $includeAbstract && (new ReflectionClass($className))->isAbstract()) {
+                continue;
+            }
+
+            if ($includeAbstract || ! (new ReflectionClass($className))->isAbstract()) {
                 $classes[] = $className;
             }
         }
@@ -240,6 +254,10 @@ class DtoSchemaBuilder
         $collectionOf = $attributes->collectionOf;
         if ($collectionOf === null && $typeName === 'array') {
             $collectionOf = $this->resolveCollectionOfFromDocBlock($property);
+        }
+
+        if ($collectionOf === null && $typeName === 'array') {
+            $collectionOf = $this->resolveCollectionOfFromConstructorParamDocBlock($property);
         }
 
         $hasDefault = $defaultValue !== null || $this->propertyHasDefault($property);
@@ -570,21 +588,29 @@ class DtoSchemaBuilder
     {
         $refClass = $meta->collectionOf;
         $refSchemaName = $this->resolveSchemaName($refClass);
+        $oneOfRefs = $this->subclassSchemaRefs($refClass);
 
         // If grouped collection: type object with additionalProperties containing array of $ref items
         if ($meta->groupedCollection !== null) {
-            return $this->buildGroupedCollectionProperty($meta, $refSchemaName);
+            return $this->buildGroupedCollectionProperty($meta, $refSchemaName, $oneOfRefs);
         }
 
         // Plain DataCollection: type array with items.$ref wrapped in allOf
         $props = [
             'property' => $meta->name,
             'type' => 'array',
-            'items' => new OA\Items([
-                'allOf' => [
-                    new OA\Schema(['ref' => '#/components/schemas/' . $refSchemaName]),
-                ],
-            ]),
+            'items' => $oneOfRefs !== []
+                ? new OA\Items([
+                    'oneOf' => array_map(
+                        static fn (string $ref): OA\Schema => new OA\Schema(['ref' => $ref]),
+                        $oneOfRefs,
+                    ),
+                ])
+                : new OA\Items([
+                    'allOf' => [
+                        new OA\Schema(['ref' => '#/components/schemas/' . $refSchemaName]),
+                    ],
+                ]),
         ];
 
         if ($meta->description) {
@@ -597,16 +623,23 @@ class DtoSchemaBuilder
     /**
      * Build a property for a grouped collection (dictionary/map of arrays of schema refs).
      */
-    private function buildGroupedCollectionProperty(object $meta, string $refSchemaName): OA\Property
+    private function buildGroupedCollectionProperty(object $meta, string $refSchemaName, array $oneOfRefs = []): OA\Property
     {
         $props = [
             'property' => $meta->name,
             'type' => 'object',
             'additionalProperties' => new OA\AdditionalProperties([
                 'type' => 'array',
-                'items' => new OA\Items([
-                    'ref' => '#/components/schemas/' . $refSchemaName,
-                ]),
+                'items' => $oneOfRefs !== []
+                    ? new OA\Items([
+                        'oneOf' => array_map(
+                            static fn (string $ref): OA\Schema => new OA\Schema(['ref' => $ref]),
+                            $oneOfRefs,
+                        ),
+                    ])
+                    : new OA\Items([
+                        'ref' => '#/components/schemas/' . $refSchemaName,
+                    ]),
             ]),
         ];
 
@@ -623,13 +656,22 @@ class DtoSchemaBuilder
     private function buildNestedObjectProperty(object $meta): OA\Property
     {
         $refSchemaName = $this->resolveSchemaName($meta->typeName);
+        $oneOfRefs = $this->subclassSchemaRefs($meta->typeName);
 
         $props = [
             'property' => $meta->name,
-            'allOf' => [
-                new OA\Schema(['ref' => '#/components/schemas/' . $refSchemaName]),
-            ],
         ];
+
+        if ($oneOfRefs !== []) {
+            $props['oneOf'] = array_map(
+                static fn (string $ref): OA\Schema => new OA\Schema(['ref' => $ref]),
+                $oneOfRefs,
+            );
+        } else {
+            $props['allOf'] = [
+                new OA\Schema(['ref' => '#/components/schemas/' . $refSchemaName]),
+            ];
+        }
 
         if ($meta->description) {
             $props['description'] = $meta->description;
@@ -1019,6 +1061,127 @@ class DtoSchemaBuilder
         }
 
         return $this->isDataSubclass($fqcn) ? $fqcn : null;
+    }
+
+    private function resolveCollectionOfFromConstructorParamDocBlock(ReflectionProperty $property): ?string
+    {
+        $constructor = $property->getDeclaringClass()->getConstructor();
+        $docComment = $constructor?->getDocComment();
+        if ($docComment === null || $docComment === false) {
+            return null;
+        }
+
+        $propertyName = preg_quote($property->getName(), '/');
+        $patterns = [
+            '/@param\s+([\w\\\\]+)\[\]\s+\$' . $propertyName . '\b/',
+            '/@param\s+(?:array|Collection)<\s*\w+\s*,\s*([\w\\\\]+)\s*>\s+\$' . $propertyName . '\b/',
+        ];
+
+        $className = null;
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $docComment, $matches)) {
+                $className = $matches[1];
+                break;
+            }
+        }
+
+        if ($className === null) {
+            return null;
+        }
+
+        $fqcn = $this->resolveClassFqcn($className, $property->getDeclaringClass());
+        if ($fqcn === null) {
+            return null;
+        }
+
+        return $this->isDataSubclass($fqcn) ? $fqcn : null;
+    }
+
+    /**
+     * @return string[]
+     */
+    private function requiredPropertiesFromRules(string $className): array
+    {
+        if (! method_exists($className, 'rules')) {
+            return [];
+        }
+
+        try {
+            $rules = (array) $className::rules();
+        } catch (\Throwable) {
+            return [];
+        }
+
+        $required = [];
+
+        foreach ($rules as $property => $ruleSet) {
+            $property = (string) $property;
+            if ($property === '' || str_contains($property, '.')) {
+                continue;
+            }
+
+            foreach ($this->normalizeRuleSet($ruleSet) as $rule) {
+                if ($this->ruleName($rule) === 'required') {
+                    $required[] = $property;
+                    break;
+                }
+            }
+        }
+
+        return array_values(array_unique($required));
+    }
+
+    /**
+     * @return array<int, mixed>
+     */
+    private function normalizeRuleSet(mixed $rules): array
+    {
+        if (is_string($rules)) {
+            return explode('|', $rules);
+        }
+
+        return is_array($rules) ? $rules : [$rules];
+    }
+
+    private function ruleName(mixed $rule): string
+    {
+        if (is_string($rule)) {
+            return strtolower(explode(':', $rule, 2)[0]);
+        }
+
+        return strtolower(class_basename(is_object($rule) ? $rule::class : (string) $rule));
+    }
+
+    /**
+     * @return string[]
+     */
+    private function subclassSchemaRefs(string $className): array
+    {
+        if (! class_exists($className)) {
+            return [];
+        }
+
+        $refs = [];
+
+        foreach ($this->discoveredDataClasses as $candidate) {
+            if ($candidate === $className || ! is_subclass_of($candidate, $className)) {
+                continue;
+            }
+
+            try {
+                if ((new ReflectionClass($candidate))->isAbstract()) {
+                    continue;
+                }
+            } catch (Exception) {
+                continue;
+            }
+
+            $refs[] = '#/components/schemas/' . $this->resolveSchemaName($candidate);
+        }
+
+        sort($refs);
+
+        return array_values(array_unique($refs));
     }
 
     /**

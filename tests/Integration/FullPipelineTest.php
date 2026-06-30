@@ -250,6 +250,10 @@ test('endpoint auto-generation creates operations from scoped Laravel routes', f
         ->middleware('auth:sanctum')
         ->name('generated.response-json-collection');
 
+    app('router')->post('/api/generated/service-response', [GeneratedEndpointController::class, 'createWithServiceResponse'])
+        ->middleware('auth:sanctum')
+        ->name('generated.service-response');
+
     app('router')->delete('/api/generated/no-content', [GeneratedEndpointController::class, 'deleteWithNoContent'])
         ->middleware('auth:sanctum')
         ->name('generated.no-content');
@@ -283,6 +287,7 @@ test('endpoint auto-generation creates operations from scoped Laravel routes', f
         '/api/generated/no-content',
         '/api/generated/numeric-status',
         '/api/generated/response-json-collection',
+        '/api/generated/service-response',
         '/api/generated/{project}',
     ]);
 
@@ -342,6 +347,10 @@ test('endpoint auto-generation creates operations from scoped Laravel routes', f
         ->and($responseJsonCollection['responses'])->not->toHaveKey('200')
         ->and($responseJsonCollection['responses']['201']['content']['application/json']['schema']['type'])->toBe('array')
         ->and($responseJsonCollection['responses']['201']['content']['application/json']['schema']['items']['$ref'])->toBe('#/components/schemas/ExampleData');
+
+    $serviceResponse = $json['paths']['/api/generated/service-response']['post'];
+    expect($serviceResponse['responses']['200']['content']['application/json']['schema']['$ref'])
+        ->toBe('#/components/schemas/PolymorphicReportData');
 
     $noContent = $json['paths']['/api/generated/no-content']['delete'];
     expect($noContent['responses'])->toHaveKey('204')

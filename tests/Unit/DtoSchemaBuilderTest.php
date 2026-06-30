@@ -356,3 +356,55 @@ test('abstract Data subclasses are skipped from auto-schema generation', functio
 
     expect($names)->not->toContain('AbstractBlock');
 });
+
+test('docblock collection of abstract Data base emits oneOf concrete subclasses', function () {
+    $schemas = $this->builder->buildAll();
+    $schema = collect($schemas)->first(fn (OA\Schema $s) => $s->schema === 'PolymorphicReportData');
+
+    $metrics = collect($schema->properties)
+        ->first(fn (OA\Property $p) => $p->property === 'metrics');
+
+    $refs = array_map(fn (OA\Schema $s) => $s->ref, $metrics->items->oneOf);
+
+    expect($refs)->toEqualCanonicalizing([
+        '#/components/schemas/ScalarMetricResultData',
+        '#/components/schemas/SeriesMetricResultData',
+    ]);
+});
+
+test('constructor param docblock collection of abstract Data base emits oneOf concrete subclasses', function () {
+    $schemas = $this->builder->buildAll();
+    $schema = collect($schemas)->first(fn (OA\Schema $s) => $s->schema === 'ConstructorDocblockReportData');
+
+    $metrics = collect($schema->properties)
+        ->first(fn (OA\Property $p) => $p->property === 'metrics');
+
+    $refs = array_map(fn (OA\Schema $s) => $s->ref, $metrics->items->oneOf);
+
+    expect($refs)->toEqualCanonicalizing([
+        '#/components/schemas/ScalarMetricResultData',
+        '#/components/schemas/SeriesMetricResultData',
+    ]);
+});
+
+test('nested Data base with concrete subclasses emits oneOf variants', function () {
+    $schemas = $this->builder->buildAll();
+    $schema = collect($schemas)->first(fn (OA\Schema $s) => $s->schema === 'PolymorphicMetricQueryData');
+
+    $context = collect($schema->properties)
+        ->first(fn (OA\Property $p) => $p->property === 'context');
+
+    $refs = array_map(fn (OA\Schema $s) => $s->ref, $context->oneOf);
+
+    expect($refs)->toEqualCanonicalizing([
+        '#/components/schemas/OrdersMetricContextData',
+        '#/components/schemas/RevenueMetricContextData',
+    ]);
+});
+
+test('Data rules mark required fields even when class is not named Request', function () {
+    $schemas = $this->builder->buildAll();
+    $schema = collect($schemas)->first(fn (OA\Schema $s) => $s->schema === 'RulesBackedQueryData');
+
+    expect($schema->required)->toBe(['context']);
+});

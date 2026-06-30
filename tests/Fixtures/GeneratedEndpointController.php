@@ -12,6 +12,8 @@ use Symfony\Component\HttpFoundation\Response;
 #[OpenApiEndpoint(tags: ['Projects'])]
 class GeneratedEndpointController
 {
+    public function __construct(private readonly GeneratedEndpointService $service) {}
+
     #[OpenApiEndpoint(summary: 'Show generated project')]
     public function show(GeneratedEndpointRequest $request): ExampleData
     {
@@ -106,5 +108,13 @@ class GeneratedEndpointController
     public function deleteWithNoContent(): JsonResponse
     {
         return response()->json(null, Response::HTTP_NO_CONTENT);
+    }
+
+    /**
+     * Create generated report through service-style response.
+     */
+    public function createWithServiceResponse(): JsonResponse
+    {
+        return $this->service->run()->toJsonResponse();
     }
 }

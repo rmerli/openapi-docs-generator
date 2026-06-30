@@ -718,7 +718,70 @@ class EndpointGenerator
             ];
         }
 
+        $serviceInference = $this->responseClassFromServiceCall($body, $method->getDeclaringClass());
+        if ($serviceInference !== null) {
+            return $serviceInference;
+        }
+
         return null;
+    }
+
+    private function responseClassFromServiceCall(string $body, ReflectionClass $declaringClass): ?object
+    {
+        preg_match_all(
+            '/\$this->([A-Za-z_][A-Za-z0-9_]*)->([A-Za-z_][A-Za-z0-9_]*)\s*\(/',
+            $body,
+            $matches,
+            PREG_SET_ORDER | PREG_OFFSET_CAPTURE,
+        );
+
+        foreach ($matches as $match) {
+            $propertyName = $match[1][0];
+            $methodName = $match[2][0];
+            $offset = $match[0][1];
+
+            $chain = substr($body, $offset, 1000);
+            if (! preg_match('/->toJsonResponse\s*\(/', $chain)) {
+                continue;
+            }
+
+            $serviceClass = $this->propertyClassName($declaringClass, $propertyName);
+            if ($serviceClass === null || ! method_exists($serviceClass, $methodName)) {
+                continue;
+            }
+
+            $serviceMethod = new ReflectionMethod($serviceClass, $methodName);
+            $returnType = $serviceMethod->getReturnType();
+            if (! $returnType instanceof ReflectionNamedType || $returnType->isBuiltin()) {
+                continue;
+            }
+
+            $className = $returnType->getName();
+            if (! is_a($className, Data::class, true)) {
+                continue;
+            }
+
+            return (object) [
+                'className' => $className,
+                'collection' => false,
+                'status' => $this->responseStatusFromDataChain($body, $offset, $declaringClass),
+            ];
+        }
+
+        return null;
+    }
+
+    private function propertyClassName(ReflectionClass $class, string $propertyName): ?string
+    {
+        if (! $class->hasProperty($propertyName)) {
+            return null;
+        }
+
+        $type = $class->getProperty($propertyName)->getType();
+
+        return $type instanceof ReflectionNamedType && ! $type->isBuiltin()
+            ? $type->getName()
+            : null;
     }
 
     private function responseStatusFromDataChain(string $body, int $offset, ReflectionClass $declaringClass): int
